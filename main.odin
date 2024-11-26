@@ -15,7 +15,7 @@ Player :: struct {
 	center:          rl.Vector2,
 	rect:            rl.Rectangle,
 	range:           f32,
-	fire_rate:       int,
+	fire_rate:       f64,
 	last_shoot_time: time.Time,
 }
 
@@ -167,7 +167,7 @@ main :: proc() {
 		if closer_enemy.distance_to_player < (player.range * player.range) {
 			duration := time.since(player.last_shoot_time)
 			ms_elapsed := time.duration_milliseconds(duration)
-			if ms_elapsed >= 1000.0 / f64(player.fire_rate) {
+			if ms_elapsed >= 1000.0 / player.fire_rate {
 				player.last_shoot_time = time.now()
 				atk := 50
 				append(
