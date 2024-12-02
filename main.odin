@@ -1,7 +1,7 @@
 package main
 import "core:fmt"
+import "core:log"
 import "core:math/linalg"
-import "core:sort"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -28,174 +28,265 @@ Enemy :: struct {
 	hp:                 int,
 	projected_hp:       int,
 	distance_to_player: f32,
+	dead:               bool,
 }
 
 Projectile :: struct {
+	id:        int,
 	atk:       int,
 	speed:     f32,
 	radius:    f32,
 	direction: rl.Vector2,
 	position:  rl.Vector2,
+	target:    ^Enemy,
+	dead:      bool,
 }
 
-check_enemies_to_projectile :: proc(
-	projectile: ^Projectile,
-	enemies: ^[dynamic]Enemy,
-) -> (
-	^Enemy,
-	int,
+spawn_enemy :: proc(enemies: ^[dynamic]^Enemy, player: ^Player, id: ^int) {
+	log.debug("creating enemies")
+	if len(enemies) < 1000 {
+		create_dir := linalg.normalize(
+			rl.Vector2 {
+				cast(f32)rl.GetRandomValue(-100, 100),
+				cast(f32)rl.GetRandomValue(-100, 100),
+			},
+		)
+		enemy_center :=
+			rl.Vector2{WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2} +
+			rl.Vector2{WINDOW_WIDTH * 1, WINDOW_HEIGHT * 1} * create_dir
+
+		hp := 100
+		enemy := new(Enemy)
+		enemy.id = id^
+		enemy.hp = hp
+		enemy.projected_hp = hp
+		enemy.speed = 150.0
+		enemy.center = enemy_center
+		enemy.rect = {enemy_center.x - 5, enemy_center.y - 5, 10, 10}
+		enemy.direction = linalg.normalize(player.center - enemy_center)
+		enemy.distance_to_player = linalg.vector_length2(player.center - enemy_center)
+		enemy.dead = false
+		append(enemies, enemy)
+		id^ += 1
+	}
+}
+
+spawn_projectile :: proc(
+	player: ^Player,
+	enemy: ^Enemy,
+	projectiles: ^[dynamic]^Projectile,
+	id: ^int,
 ) {
-	for &enemy, index in enemies {
-		collided := rl.CheckCollisionCircleRec(projectile.position, projectile.radius, enemy.rect)
+	log.debug("checking closer enemy")
+	if enemy != nil && enemy.distance_to_player < (player.range * player.range) {
+		duration := time.since(player.last_shoot_time)
+		if time.duration_milliseconds(duration) >= 1000.0 / f64(player.fire_rate) {
+			player.last_shoot_time = time.now()
+			atk := 50
+			projectile := new(Projectile)
+			projectile.id = id^
+			projectile.atk = atk
+			projectile.speed = 500.0
+			projectile.radius = 5
+			projectile.position = player.center
+			projectile.direction = linalg.normalize(enemy.center - player.center)
+			projectile.target = enemy
+			projectile.dead = false
+			append(projectiles, projectile)
+			id^ += 1
+			enemy.projected_hp -= atk
+		}
+	}
+}
+
+process_enemies :: proc(enemies: ^[dynamic]^Enemy, player: ^Player, frame_time: f32) -> ^Enemy {
+	log.debug("processing enemies")
+	closest_enemy: ^Enemy = nil
+	for enemy in enemies {
+		// rl.DrawRectangleRec(enemy.rect, rl.BLUE)
+		collided := rl.CheckCollisionRecs(enemy.rect, player.rect)
+		enemy.distance_to_player = linalg.vector_length2(player.center - enemy.center)
+
+		if closest_enemy == nil || closest_enemy.distance_to_player > enemy.distance_to_player {
+			if enemy.projected_hp > 0 {
+				closest_enemy = enemy
+			}
+		}
+
 		if collided {
-			return &enemy, index
+			// enemy.dead = true
+			// dead_enemies += 1
+		} else {
+			move := enemy.direction * enemy.speed * frame_time
+			enemy.center += move
+			enemy.rect.x += move.x
+			enemy.rect.y += move.y
 		}
 	}
 
-	return nil, 0
+	return closest_enemy
+}
+
+draw_enemies :: proc(enemies: ^[dynamic]^Enemy) {
+	for enemy in enemies {
+		rl.DrawRectangleRec(enemy.rect, rl.BLUE)
+	}
 }
 
 /* compute damage, enemy hp/projected hp and removes enemy from list if hp reaches 0 */
-projectile_hit :: proc(projectile: ^Projectile, enemy: ^Enemy) {
+projectile_hit :: proc(projectile: ^Projectile) {
 	damage := projectile.atk
-	enemy.hp -= damage
-	enemy.projected_hp -= (damage - projectile.atk) // if we add a possible crit, we need to further reduce the projected hp by the difference
+	projectile.target.hp -= damage
+	projectile.target.projected_hp -= (damage - projectile.atk) // if we add a possible crit, we need to further reduce the projected hp by the difference
+}
+
+is_outbound_circle :: proc(position: rl.Vector2, radius: f32) -> bool {
+	return(
+		position.x >= (WINDOW_WIDTH + radius) ||
+		position.x < 0 ||
+		position.y < 0 ||
+		position.y >= (WINDOW_HEIGHT + radius) \
+	)
+}
+
+process_projectiles :: proc(
+	projectiles: ^[dynamic]^Projectile,
+	dead_enemies: ^int,
+	dead_projectiles: ^int,
+	frame_time: f32,
+) {
+	log.debug("processing projectiles")
+	for projectile, index in projectiles {
+		if projectile.target.dead {
+			continue
+		}
+		if rl.CheckCollisionCircleRec(
+			projectile.position,
+			projectile.radius,
+			projectile.target.rect,
+		) {
+			projectile_hit(projectile)
+			if projectile.target.hp <= 0 {
+				projectile.target.dead = true
+				dead_enemies^ += 1
+			} else {
+				projectile.dead = true
+				dead_projectiles^ += 1
+			}
+		} else if is_outbound_circle(projectile.position, projectile.radius) {
+			projectile.dead = true
+			dead_projectiles^ += 1
+		}
+
+		projectile.position += projectile.direction * projectile.speed * frame_time
+	}
+}
+
+draw_projectiles :: proc(projectiles: ^[dynamic]^Projectile) {
+	for projectile in projectiles {
+		rl.DrawCircleV(projectile.position, projectile.radius, rl.RED)
+	}
+}
+
+clean_projectiles :: proc(projectiles: ^[dynamic]^Projectile) {
+	log.debug("removing projectiles")
+	for i := 0; i < len(projectiles); {
+		projectile := projectiles[i]
+		if projectile.dead || projectile.target.dead {
+			free(projectiles[i])
+			unordered_remove(projectiles, i)
+		} else {
+			i += 1
+		}
+	}
+}
+
+clean_enemies :: proc(enemies: ^[dynamic]^Enemy) {
+	log.debug("removing enemies")
+	for i := 0; i < len(enemies); {
+		if enemies[i].dead {
+			free(enemies[i])
+			unordered_remove(enemies, i)
+		} else {
+			i += 1
+		}
+	}
 }
 
 main :: proc() {
 	using rl
+	context.logger = log.create_console_logger(.Info)
 
 	SetConfigFlags({ConfigFlag.MSAA_4X_HINT})
 	InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "towercopy")
 	defer CloseWindow()
-	SetTargetFPS(12000)
+	SetTargetFPS(60)
 
 	player_center := Vector2{f32(WINDOW_WIDTH / 2), f32(WINDOW_HEIGHT / 2)}
 	player := Player {
 		hp              = 100,
 		range           = 200,
-		fire_rate       = 1500,
+		fire_rate       = 15000,
 		center          = player_center,
 		rect            = {player_center.x - 40 / 2, player_center.y - 80 / 2, 40, 80},
 		last_shoot_time = time.now(),
 	}
 
-	enemies := [dynamic]Enemy{}
-	projectiles := [dynamic]Projectile{}
+	enemies := [dynamic]^Enemy{}
+	projectiles := [dynamic]^Projectile{}
 
-	enemies_to_remove := [dynamic]int{}
-	projectiles_to_remove := [dynamic]int{}
+	it := 0
+	dead_enemies := 0
+	dead_projectiles := 0
+
+	projectile_id := 0
+	enemy_id := 0
+	frame_time: f32
+	closest_enemy: ^Enemy
 
 	for !WindowShouldClose() {
-		frame_time := GetFrameTime()
+		frame_time = GetFrameTime()
 		BeginDrawing()
 		defer EndDrawing()
 
 		ClearBackground(DARKBLUE)
+
 		DrawRectangleRec(player.rect, RED)
 		DrawCircleLinesV(player_center, player.range, GREEN)
 
+		spawn_enemy(&enemies, &player, &enemy_id)
 
-		if len(&enemies) < 1000 {
-			create_dir := Vector2 {
-				cast(f32)GetRandomValue(-100, 100),
-				cast(f32)GetRandomValue(-100, 100),
-			}
-			enemy_center :=
-				Vector2{WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2} +
-				Vector2{WINDOW_WIDTH * 1, WINDOW_HEIGHT * 1} * linalg.normalize(create_dir)
+		before := time.now()
+		closest_enemy = process_enemies(&enemies, &player, frame_time)
+		// fmt.println("process_enemies", time.since(before))
 
-			hp := 100
-			append(
-				&enemies,
-				Enemy {
-					id = cast(int)GetRandomValue(0, 1000),
-					hp = hp,
-					projected_hp = hp,
-					speed = 150.0,
-					center = enemy_center,
-					rect = {enemy_center.x - 5, enemy_center.y - 5, 10, 10},
-					direction = linalg.normalize(player.center - enemy_center),
-					distance_to_player = linalg.vector_length2(player.center - enemy_center),
-				},
-			)
+		before = time.now()
+		spawn_projectile(&player, closest_enemy, &projectiles, &projectile_id)
+		// fmt.println("spawn_projectile", time.since(before))
+
+		before = time.now()
+		process_projectiles(&projectiles, &dead_enemies, &dead_projectiles, frame_time)
+		// fmt.println("process_projectiles", time.since(before))
+
+		draw_enemies(&enemies)
+		draw_projectiles(&projectiles)
+
+		if dead_projectiles > 0 || dead_enemies > 0 {
+			before = time.now()
+			clean_projectiles(&projectiles)
+			// fmt.println("clean_projectiles", time.since(before))
 		}
 
-		closer_enemy: ^Enemy = nil
-		for &enemy, index in enemies {
-			DrawRectangleRec(enemy.rect, BLUE)
-			collided := CheckCollisionRecs(enemy.rect, player.rect)
-			distance := linalg.vector_length2(player_center - enemy.center)
-			enemy.distance_to_player = distance
-
-			if closer_enemy == nil || closer_enemy.distance_to_player > distance {
-				if enemy.projected_hp > 0 {
-					closer_enemy = &enemy
-				}
-			}
-
-			if collided {
-				append(&enemies_to_remove, index)
-			} else {
-				move := enemy.direction * enemy.speed * frame_time
-				enemy.center += move
-				enemy.rect.x += move.x
-				enemy.rect.y += move.y
-			}
+		if dead_enemies > 0 {
+			before = time.now()
+			clean_enemies(&enemies)
+			// fmt.println("clean_enemies", time.since(before))
 		}
 
-		// Projectile processing
-		for &projectile, index in projectiles {
-			enemy, enemy_index := check_enemies_to_projectile(&projectile, &enemies)
-			if enemy != nil {
-				projectile_hit(&projectile, enemy) // why is this not working?
-				if enemy.hp <= 0 {
-					unordered_remove(&enemies, enemy_index)
-				}
-				append(&projectiles_to_remove, index)
-			} else if projectile.position.x >= (WINDOW_WIDTH + projectile.radius) ||
-			   projectile.position.x < 0 ||
-			   projectile.position.y < 0 ||
-			   projectile.position.y >= (WINDOW_HEIGHT + projectile.radius) {
-				append(&projectiles_to_remove, index)
-			}
-
-			projectile.position += projectile.direction * projectile.speed * frame_time
-			DrawCircleV(projectile.position, projectile.radius, RED)
-		}
-
-		if closer_enemy.distance_to_player < (player.range * player.range) {
-			duration := time.since(player.last_shoot_time)
-			ms_elapsed := time.duration_milliseconds(duration)
-			if ms_elapsed >= 1000.0 / f64(player.fire_rate) {
-				player.last_shoot_time = time.now()
-				atk := 50
-				append(
-					&projectiles,
-					Projectile {
-						atk = atk,
-						speed = 500.0,
-						radius = 5,
-						position = player.center,
-						direction = linalg.normalize(closer_enemy.center - player.center),
-					},
-				)
-				closer_enemy.projected_hp -= atk
-			}
-		}
-
-		for projectile_idx, index in projectiles_to_remove {
-			ordered_remove(&projectiles, projectile_idx - index)
-		}
-
-		for enemy_idx, index in enemies_to_remove {
-			ordered_remove(&enemies, enemy_idx - index)
-		}
-
-		clear(&projectiles_to_remove)
-		clear(&enemies_to_remove)
+		dead_projectiles = 0
+		dead_enemies = 0
 
 		DrawFPS(10, 10)
-
+		it += 1
 	}
 }
