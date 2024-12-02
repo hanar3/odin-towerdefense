@@ -10,6 +10,26 @@ import rl "vendor:raylib"
 WINDOW_WIDTH :: 800
 WINDOW_HEIGHT :: 800
 
+GameState :: enum {
+	PLAYING,
+	INTERVAL,
+}
+
+Global :: struct {
+	score:         uint,
+	money:         uint,
+	wave:          uint,
+	wave_start:    time.Time,
+	wave_duration: time.Duration,
+	state:         GameState,
+}
+global := Global {
+	wave_duration = time.Second * 10,
+	wave_start    = time.now(),
+	wave          = 1,
+	state         = GameState.PLAYING,
+}
+
 Player :: struct {
 	hp:              int,
 	center:          rl.Vector2,
@@ -169,6 +189,8 @@ process_projectiles :: proc(
 			if projectile.target.hp <= 0 {
 				projectile.target.dead = true
 				dead_enemies^ += 1
+				global.score += 10
+				global.money += 1
 			} else {
 				projectile.dead = true
 				dead_projectiles^ += 1
@@ -226,7 +248,7 @@ main :: proc() {
 	player := Player {
 		hp              = 100,
 		range           = 200,
-		fire_rate       = 15000,
+		fire_rate       = 2,
 		center          = player_center,
 		rect            = {player_center.x - 40 / 2, player_center.y - 80 / 2, 40, 80},
 		last_shoot_time = time.now(),
@@ -243,20 +265,64 @@ main :: proc() {
 	enemy_id := 0
 	frame_time: f32
 	closest_enemy: ^Enemy
+	state_changed_time := global.wave_start
+
+	enemies_per_wave := 10 + uint(f32(global.wave) / 2.0)
+	enemy_spawn_time := time.now()
+	enemy_spawn_count: uint = 0
+	enemy_spawn_delay := global.wave_duration / time.Duration(enemies_per_wave)
 
 	for !WindowShouldClose() {
 		frame_time = GetFrameTime()
 		BeginDrawing()
 		defer EndDrawing()
 
-		ClearBackground(DARKBLUE)
-
-		DrawRectangleRec(player.rect, RED)
-		DrawCircleLinesV(player_center, player.range, GREEN)
-
-		spawn_enemy(&enemies, &player, &enemy_id)
-
 		before := time.now()
+
+		if global.state == GameState.PLAYING {
+			if enemy_spawn_count < enemies_per_wave &&
+			   time.since(enemy_spawn_time) > enemy_spawn_delay {
+				spawn_enemy(&enemies, &player, &enemy_id)
+				enemy_spawn_time = time.now()
+				enemy_spawn_count += 1
+			}
+
+			if time.since(state_changed_time) > global.wave_duration {
+				global.state = GameState.INTERVAL
+				state_changed_time = time.now()
+			}
+			DrawText("PLAYING", WINDOW_WIDTH - 100, 10, 14, BLACK)
+		} else if (global.state == GameState.INTERVAL) {
+			if time.since(state_changed_time) > time.Second * 5 {
+				global.state = GameState.PLAYING
+				state_changed_time = time.now()
+				global.wave += 1
+				enemy_spawn_count = 0
+			}
+			DrawText("INTERVAL", WINDOW_WIDTH - 100, 10, 14, BLACK)
+		}
+
+		buf: [4]byte = {}
+
+
+		wave_text := strings.concatenate({"wave: ", strconv.itoa(buf[:], cast(int)global.wave)})
+		defer delete(wave_text)
+		wave_text_cstring := strings.clone_to_cstring(wave_text)
+		defer delete(wave_text_cstring)
+		DrawText(wave_text_cstring, WINDOW_WIDTH - 100, 30, 14, BLACK)
+
+		score_text := strings.concatenate({"score: ", strconv.itoa(buf[:], cast(int)global.score)})
+		defer delete(score_text)
+		score_text_cstring := strings.clone_to_cstring(score_text)
+		defer delete(score_text_cstring)
+		DrawText(score_text_cstring, WINDOW_WIDTH - 100, 50, 14, BLACK)
+
+		money_text := strings.concatenate({"money: ", strconv.itoa(buf[:], cast(int)global.money)})
+		defer delete(money_text)
+		money_text_cstring := strings.clone_to_cstring(money_text)
+		defer delete(money_text_cstring)
+		DrawText(money_text_cstring, WINDOW_WIDTH - 100, 70, 14, BLACK)
+
 		closest_enemy = process_enemies(&enemies, &player, frame_time)
 		// fmt.println("process_enemies", time.since(before))
 
@@ -267,9 +333,6 @@ main :: proc() {
 		before = time.now()
 		process_projectiles(&projectiles, &dead_enemies, &dead_projectiles, frame_time)
 		// fmt.println("process_projectiles", time.since(before))
-
-		draw_enemies(&enemies)
-		draw_projectiles(&projectiles)
 
 		if dead_projectiles > 0 || dead_enemies > 0 {
 			before = time.now()
@@ -286,7 +349,13 @@ main :: proc() {
 		dead_projectiles = 0
 		dead_enemies = 0
 
+		ClearBackground(DARKBLUE)
+		DrawRectangleRec(player.rect, RED)
+		DrawCircleLinesV(player_center, player.range, GREEN)
+		draw_enemies(&enemies)
+		draw_projectiles(&projectiles)
 		DrawFPS(10, 10)
+
 		it += 1
 	}
 }
